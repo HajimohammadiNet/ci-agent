@@ -1,0 +1,17 @@
+.git
+.gitignore
+
+.env
+.env.*
+*.pem
+*.key
+
+ci-agent
+bin/
+dist/
+
+.idea/
+.vscode/
+.DS_Store
+
+*.log
