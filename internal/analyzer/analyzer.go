@@ -22,6 +22,9 @@ type Rule struct {
 
 	// At least one of these patterns must exist.
 	Any []string
+
+	// More precise patterns used only for evidence extraction.
+	EvidencePatterns []string
 }
 
 func NewService() *Service {
@@ -93,40 +96,44 @@ func (r Rule) Match(trace string) bool {
 func defaultRules() []Rule {
 	return []Rule{
 		{
-			Category:     "helm_repository_auth_failure",
-			Required:     []string{"helm", "401 unauthorized"},
-			Any:          []string{"index.yaml", "packages/helm", "failed to fetch"},
-			RootCause:    "The Helm repository could not be accessed because authentication failed.",
-			SuggestedFix: "Check Helm repository credentials, GitLab package registry token, deploy token permissions, and helm repo add configuration in CI variables.",
-			RetrySafe:    false,
-			RiskLevel:    "medium",
+			Category:         "helm_repository_auth_failure",
+			Required:         []string{"helm", "401 unauthorized"},
+			Any:              []string{"index.yaml", "packages/helm", "failed to fetch"},
+			EvidencePatterns: []string{"401 unauthorized", "failed to fetch", "index.yaml", "packages/helm"},
+			RootCause:        "The Helm repository could not be accessed because authentication failed.",
+			SuggestedFix:     "Check Helm repository credentials, GitLab package registry token, deploy token permissions, and helm repo add configuration in CI variables.",
+			RetrySafe:        false,
+			RiskLevel:        "medium",
 		},
 		{
-			Category:     "kubernetes_helm_rollout_timeout",
-			Required:     []string{"helm", "resource not ready"},
-			Any:          []string{"context deadline exceeded", "deployment", "inprogress", "upgrade failed"},
-			RootCause:    "The Helm deployment failed because a Kubernetes resource did not become ready before the timeout.",
-			SuggestedFix: "Check the target Deployment pods, events, readiness probes, image pull status, resource limits, and application logs. Increase Helm timeout only after confirming the app is healthy but slow.",
-			RetrySafe:    false,
-			RiskLevel:    "high",
+			Category:         "kubernetes_helm_rollout_timeout",
+			Required:         []string{"helm", "resource not ready"},
+			Any:              []string{"context deadline exceeded", "deployment", "inprogress", "upgrade failed"},
+			EvidencePatterns: []string{"resource not ready", "context deadline exceeded", "upgrade failed", "status: InProgress"},
+			RootCause:        "The Helm deployment failed because a Kubernetes resource did not become ready before the timeout.",
+			SuggestedFix:     "Check the target Deployment pods, events, readiness probes, image pull status, resource limits, and application logs. Increase Helm timeout only after confirming the app is healthy but slow.",
+			RetrySafe:        false,
+			RiskLevel:        "high",
 		},
 		{
-			Category:     "go_dependency_download_failure",
-			Required:     []string{"go mod download"},
-			Any:          []string{"exit code: 1", "failed to solve", "did not complete successfully"},
-			RootCause:    "The Docker build failed while running 'go mod download'. This is usually caused by private module access, network/DNS problems, invalid Go module configuration, or missing Git credentials inside the Docker build context.",
-			SuggestedFix: "Check GOPRIVATE, Git credentials for private Go modules, go.mod module paths, network access from the runner, and whether the Dockerfile has access to required credentials during 'go mod download'.",
-			RetrySafe:    true,
-			RiskLevel:    "medium",
+			Category:         "go_dependency_download_failure",
+			Required:         []string{"go mod download"},
+			Any:              []string{"exit code: 1", "failed to solve", "did not complete successfully"},
+			EvidencePatterns: []string{"go mod download", "exit code: 1", "failed to solve", "did not complete successfully"},
+			RootCause:        "The Docker build failed while running 'go mod download'. This is usually caused by private module access, network/DNS problems, invalid Go module configuration, or missing Git credentials inside the Docker build context.",
+			SuggestedFix:     "Check GOPRIVATE, Git credentials for private Go modules, go.mod module paths, network access from the runner, and whether the Dockerfile has access to required credentials during 'go mod download'.",
+			RetrySafe:        true,
+			RiskLevel:        "medium",
 		},
 		{
-			Category:     "docker_build_failure",
-			Required:     []string{"failed to solve"},
-			Any:          []string{"dockerfile", "did not complete successfully", "failed to build", "error:"},
-			RootCause:    "The Docker image build failed.",
-			SuggestedFix: "Check the Dockerfile step shown in the error, required files in build context, base image availability, dependency installation, and build arguments.",
-			RetrySafe:    false,
-			RiskLevel:    "medium",
+			Category:         "docker_build_failure",
+			Required:         []string{"failed to solve"},
+			Any:              []string{"dockerfile", "did not complete successfully", "failed to build", "error:"},
+			EvidencePatterns: []string{"failed to solve", "dockerfile", "did not complete successfully", "failed to build", "error:"},
+			RootCause:        "The Docker image build failed.",
+			SuggestedFix:     "Check the Dockerfile step shown in the error, required files in build context, base image availability, dependency installation, and build arguments.",
+			RetrySafe:        false,
+			RiskLevel:        "medium",
 		},
 		{
 			Category:     "runner_disk_full",
@@ -223,9 +230,25 @@ func extractEvidenceForRule(trace string, rule Rule) []string {
 	lines := strings.Split(trace, "\n")
 
 	keywords := make([]string, 0)
-	keywords = append(keywords, rule.Required...)
-	keywords = append(keywords, rule.Any...)
 
+	// Prefer precise evidence patterns.
+	keywords = append(keywords, rule.EvidencePatterns...)
+
+	// Fallback to matching patterns if no dedicated evidence patterns exist.
+	if len(keywords) == 0 {
+		keywords = append(keywords, rule.Any...)
+		keywords = append(keywords, rule.Required...)
+	}
+
+	evidence := collectEvidenceByKeywords(lines, keywords, 10)
+	if len(evidence) > 0 {
+		return evidence
+	}
+
+	return extractEvidence(trace)
+}
+
+func collectEvidenceByKeywords(lines []string, keywords []string, limit int) []string {
 	var evidence []string
 	seen := map[string]bool{}
 
@@ -242,6 +265,7 @@ func extractEvidenceForRule(trace string, rule Rule) []string {
 		}
 
 		for _, keyword := range keywords {
+			keyword = strings.TrimSpace(keyword)
 			if keyword == "" {
 				continue
 			}
@@ -256,12 +280,8 @@ func extractEvidenceForRule(trace string, rule Rule) []string {
 		}
 	}
 
-	if len(evidence) > 10 {
-		return evidence[len(evidence)-10:]
-	}
-
-	if len(evidence) == 0 {
-		return extractEvidence(trace)
+	if len(evidence) > limit {
+		return evidence[len(evidence)-limit:]
 	}
 
 	return evidence
