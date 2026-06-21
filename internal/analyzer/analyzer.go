@@ -34,32 +34,39 @@ func (s *Service) AnalyzeJob(job models.Job, trace string) models.JobAnalysis {
 	cleanTrace := NormalizeTrace(RedactSecrets(trace))
 	lower := strings.ToLower(cleanTrace)
 
+	findings := make([]models.Finding, 0)
+
 	for _, rule := range s.rules {
-		if rule.Match(lower) {
-			return models.JobAnalysis{
-				JobID:        job.ID,
-				JobName:      job.Name,
-				Stage:        job.Stage,
-				Category:     rule.Category,
-				RootCause:    rule.RootCause,
-				Evidence:     extractEvidence(cleanTrace),
-				SuggestedFix: rule.SuggestedFix,
-				RetrySafe:    rule.RetrySafe,
-				RiskLevel:    rule.RiskLevel,
-			}
+		if !rule.Match(lower) {
+			continue
 		}
+
+		findings = append(findings, models.Finding{
+			Category:     rule.Category,
+			RootCause:    rule.RootCause,
+			Evidence:     extractEvidenceForRule(cleanTrace, rule),
+			SuggestedFix: rule.SuggestedFix,
+			RetrySafe:    rule.RetrySafe,
+			RiskLevel:    rule.RiskLevel,
+		})
+	}
+
+	if len(findings) == 0 {
+		findings = append(findings, models.Finding{
+			Category:     "unknown_failure",
+			RootCause:    "The job failed, but the current rule engine could not determine a specific root cause.",
+			Evidence:     extractEvidence(cleanTrace),
+			SuggestedFix: "Review the failed command and the last part of the job log. Consider adding a new rule for this failure pattern.",
+			RetrySafe:    false,
+			RiskLevel:    "unknown",
+		})
 	}
 
 	return models.JobAnalysis{
-		JobID:        job.ID,
-		JobName:      job.Name,
-		Stage:        job.Stage,
-		Category:     "unknown_failure",
-		RootCause:    "The job failed, but the current rule engine could not determine a specific root cause.",
-		Evidence:     extractEvidence(cleanTrace),
-		SuggestedFix: "Review the failed command and the last part of the job log. Consider adding a new rule for this failure pattern.",
-		RetrySafe:    false,
-		RiskLevel:    "unknown",
+		JobID:    job.ID,
+		JobName:  job.Name,
+		Stage:    job.Stage,
+		Findings: findings,
 	}
 }
 
@@ -210,6 +217,54 @@ func defaultRules() []Rule {
 			RiskLevel:    "medium",
 		},
 	}
+}
+
+func extractEvidenceForRule(trace string, rule Rule) []string {
+	lines := strings.Split(trace, "\n")
+
+	keywords := make([]string, 0)
+	keywords = append(keywords, rule.Required...)
+	keywords = append(keywords, rule.Any...)
+
+	var evidence []string
+	seen := map[string]bool{}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		lower := strings.ToLower(trimmed)
+
+		if strings.HasPrefix(lower, "section_start:") || strings.HasPrefix(lower, "section_end:") {
+			continue
+		}
+
+		for _, keyword := range keywords {
+			if keyword == "" {
+				continue
+			}
+
+			if strings.Contains(lower, strings.ToLower(keyword)) {
+				if !seen[trimmed] {
+					evidence = append(evidence, trimmed)
+					seen[trimmed] = true
+				}
+				break
+			}
+		}
+	}
+
+	if len(evidence) > 10 {
+		return evidence[len(evidence)-10:]
+	}
+
+	if len(evidence) == 0 {
+		return extractEvidence(trace)
+	}
+
+	return evidence
 }
 
 func extractEvidence(trace string) []string {

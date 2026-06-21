@@ -28,15 +28,10 @@ type Job struct {
 }
 
 type JobAnalysis struct {
-	JobID        int64    `json:"job_id"`
-	JobName      string   `json:"job_name"`
-	Stage        string   `json:"stage"`
-	Category     string   `json:"category"`
-	RootCause    string   `json:"root_cause"`
-	Evidence     []string `json:"evidence"`
-	SuggestedFix string   `json:"suggested_fix"`
-	RetrySafe    bool     `json:"retry_safe"`
-	RiskLevel    string   `json:"risk_level"`
+	JobID    int64     `json:"job_id"`
+	JobName  string    `json:"job_name"`
+	Stage    string    `json:"stage"`
+	Findings []Finding `json:"findings"`
 }
 
 type PipelineAnalysis struct {
@@ -47,4 +42,13 @@ type PipelineAnalysis struct {
 	SHA        string        `json:"sha"`
 	WebURL     string        `json:"web_url"`
 	Jobs       []JobAnalysis `json:"jobs"`
+}
+
+type Finding struct {
+	Category     string   `json:"category"`
+	RootCause    string   `json:"root_cause"`
+	Evidence     []string `json:"evidence"`
+	SuggestedFix string   `json:"suggested_fix"`
+	RetrySafe    bool     `json:"retry_safe"`
+	RiskLevel    string   `json:"risk_level"`
 }
