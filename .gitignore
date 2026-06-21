@@ -6,9 +6,6 @@
 *.out
 coverage.out
 
-# Build output
-ci-agent
-
 # Env / secrets
 .env
 .env.*
