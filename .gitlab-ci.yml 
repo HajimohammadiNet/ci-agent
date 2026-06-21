@@ -1,0 +1,78 @@
+stages:
+  - build-push
+  - deploy
+
+variables:
+  IMAGE_NAME: $CI_PROJECT_PATH
+  HELM_CHART_PATH: deployments/helm/ci-agent
+
+default:
+  retry:
+    max: 2
+    when:
+      - stuck_or_timeout_failure
+      - unknown_failure
+      - job_execution_timeout
+      - runner_system_failure
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      when: always
+    - if: '$CI_COMMIT_TAG =~ /^release-v[0-9]+\.[0-9]+\.[0-9]+$/'
+      when: always
+    - when: never
+
+build-push:
+  stage: build-push
+  image: docker:26.1.3
+  services:
+    - docker:26.1.3-dind
+  tags:
+    - general-docker-builder-2
+  script: |
+    if [[ "$CI_COMMIT_TAG" =~ ^release-(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+      IMAGE_TAG="${BASH_REMATCH[1]}"
+    else
+      IMAGE_TAG="${CI_COMMIT_SHORT_SHA}"
+    fi
+
+    export IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+    docker login -u "$REGISTRY_USER" -p "$REGISTRY_PASSWORD" "$REGISTRY"
+    docker buildx build --platform linux/amd64 -t "$IMAGE" --push .
+
+deploy:
+  stage: deploy
+  tags:
+    - beta-deploy
+  needs:
+    - build-push
+  variables:
+    KUBECONFIG: "/home/gitlab-runner/.kube/config"
+    KUBECONTEXT: beta-rahkar
+    VALUES_FILE: "deployments/helm/ci-agent/values-rahkar.yaml"
+
+  before_script:
+    - helm version
+    - kubectl version --client
+
+  script: |
+    if [[ "$CI_COMMIT_TAG" =~ ^release-(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+      IMAGE_TAG="${BASH_REMATCH[1]}"
+    else
+      IMAGE_TAG="${CI_COMMIT_SHORT_SHA}"
+    fi
+
+    RELEASE="ci-agent"
+
+    helm lint "$HELM_CHART_PATH"
+    helm template ci-agent "$HELM_CHART_PATH" -f "$VALUES_FILE"
+
+    helm upgrade --install "$RELEASE" "$HELM_CHART_PATH" \
+      -f "$VALUES_FILE" \
+      --kube-context "$KUBECONTEXT" \
+      --namespace agentops \
+      --set image.registry="$REGISTRY" \
+      --set image.repository="$CI_PROJECT_PATH" \
+      --set image.tag="$IMAGE_TAG"
