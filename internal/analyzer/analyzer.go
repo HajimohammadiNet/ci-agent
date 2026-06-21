@@ -6,127 +6,218 @@ import (
 	"github.com/hajimohammadinet/ci-agent/internal/models"
 )
 
-type Service struct{}
+type Service struct {
+	rules []Rule
+}
+
+type Rule struct {
+	Category     string
+	RootCause    string
+	SuggestedFix string
+	RetrySafe    bool
+	RiskLevel    string
+
+	// All required patterns must exist in the trace.
+	Required []string
+
+	// At least one of these patterns must exist.
+	Any []string
+}
 
 func NewService() *Service {
-	return &Service{}
+	return &Service{
+		rules: defaultRules(),
+	}
 }
 
 func (s *Service) AnalyzeJob(job models.Job, trace string) models.JobAnalysis {
-	cleanTrace := RedactSecrets(trace)
+	cleanTrace := NormalizeTrace(RedactSecrets(trace))
 	lower := strings.ToLower(cleanTrace)
 
-	category := "unknown_failure"
-	rootCause := "The job failed, but the current rule engine could not determine a specific root cause."
-	suggestedFix := "Review the failed command and the last part of the job log."
-	retrySafe := false
-	risk := "unknown"
-
-	switch {
-	case containsAny(lower, "no space left on device"):
-		category = "runner_disk_full"
-		rootCause = "The GitLab runner or Docker environment appears to be out of disk space."
-		suggestedFix = "Clean Docker images, build cache, artifacts, or expand the runner disk. Retry after freeing disk space."
-		retrySafe = true
-		risk = "medium"
-
-	case containsAny(lower, "unauthorized: authentication required", "denied: requested access to the resource is denied"):
-		category = "registry_auth_failure"
-		rootCause = "The job failed because Docker registry authentication or permission was rejected."
-		suggestedFix = "Check registry credentials, deploy token, CI_REGISTRY_USER, CI_REGISTRY_PASSWORD, and image repository path."
-		retrySafe = false
-		risk = "medium"
-
-	case containsAny(lower, "cannot connect to the docker daemon"):
-		category = "runner_docker_daemon_failure"
-		rootCause = "The job could not connect to Docker daemon on the runner."
-		suggestedFix = "Check runner executor type, Docker service status, socket permissions, and privileged mode if using Docker-in-Docker."
-		retrySafe = false
-		risk = "medium"
-
-	case containsAny(lower, "npm err!", "pnpm", "yarn error"):
-		category = "frontend_dependency_or_build_failure"
-		rootCause = "The frontend dependency installation or build command failed."
-		suggestedFix = "Check Node.js version, package lock file, registry access, dependency versions, and build output."
-		retrySafe = false
-		risk = "low"
-
-	case containsAny(lower, "typescript error", "ts error", "type error"):
-		category = "frontend_typescript_failure"
-		rootCause = "The frontend build failed due to a TypeScript/type-checking error."
-		suggestedFix = "Fix the TypeScript error in the source code or update the related type definitions."
-		retrySafe = false
-		risk = "low"
-
-	case containsAny(lower, "go test", "--- fail:", "fail\t"):
-		category = "go_test_failure"
-		rootCause = "One or more Go tests failed."
-		suggestedFix = "Inspect the failing test names and recent code changes. Retry only if the failure is known to be flaky."
-		retrySafe = false
-		risk = "low"
-
-	case containsAny(lower, "mvn", "gradle", "build failed"):
-		category = "java_build_failure"
-		rootCause = "The Java/Maven/Gradle build failed."
-		suggestedFix = "Check dependency resolution, test failures, JDK version, Gradle/Maven settings, and repository access."
-		retrySafe = false
-		risk = "low"
-
-	case containsAny(lower, "helm upgrade", "upgrade failed", "helm template"):
-		category = "kubernetes_helm_deploy_failure"
-		rootCause = "The Kubernetes/Helm deployment failed."
-		suggestedFix = "Check Helm values, chart templates, Kubernetes events, image tags, ingress, secrets, and readiness probes."
-		retrySafe = false
-		risk = "high"
-
-	case containsAny(lower, "imagepullbackoff", "errimagepull"):
-		category = "kubernetes_image_pull_failure"
-		rootCause = "Kubernetes could not pull the container image."
-		suggestedFix = "Check image tag, registry access, imagePullSecrets, and whether the image was pushed successfully."
-		retrySafe = false
-		risk = "high"
-
-	case containsAny(lower, "permission denied (publickey)", "ssh: handshake failed"):
-		category = "ssh_deploy_auth_failure"
-		rootCause = "The direct server deployment failed because SSH authentication failed."
-		suggestedFix = "Check SSH private key, deploy user, authorized_keys, known_hosts, and GitLab CI variables."
-		retrySafe = false
-		risk = "medium"
-
-	case containsAny(lower, "connection timed out", "i/o timeout", "temporary failure in name resolution"):
-		category = "network_or_dns_failure"
-		rootCause = "The job failed due to a network, DNS, or connectivity problem."
-		suggestedFix = "Check runner network, DNS, proxy, firewall, registry access, and target service availability."
-		retrySafe = true
-		risk = "medium"
+	for _, rule := range s.rules {
+		if rule.Match(lower) {
+			return models.JobAnalysis{
+				JobID:        job.ID,
+				JobName:      job.Name,
+				Stage:        job.Stage,
+				Category:     rule.Category,
+				RootCause:    rule.RootCause,
+				Evidence:     extractEvidence(cleanTrace),
+				SuggestedFix: rule.SuggestedFix,
+				RetrySafe:    rule.RetrySafe,
+				RiskLevel:    rule.RiskLevel,
+			}
+		}
 	}
 
 	return models.JobAnalysis{
 		JobID:        job.ID,
 		JobName:      job.Name,
 		Stage:        job.Stage,
-		Category:     category,
-		RootCause:    rootCause,
+		Category:     "unknown_failure",
+		RootCause:    "The job failed, but the current rule engine could not determine a specific root cause.",
 		Evidence:     extractEvidence(cleanTrace),
-		SuggestedFix: suggestedFix,
-		RetrySafe:    retrySafe,
-		RiskLevel:    risk,
+		SuggestedFix: "Review the failed command and the last part of the job log. Consider adding a new rule for this failure pattern.",
+		RetrySafe:    false,
+		RiskLevel:    "unknown",
 	}
 }
 
-func containsAny(input string, patterns ...string) bool {
-	for _, pattern := range patterns {
-		if strings.Contains(input, strings.ToLower(pattern)) {
+func (r Rule) Match(trace string) bool {
+	for _, required := range r.Required {
+		if !strings.Contains(trace, strings.ToLower(required)) {
+			return false
+		}
+	}
+
+	if len(r.Any) == 0 {
+		return true
+	}
+
+	for _, pattern := range r.Any {
+		if strings.Contains(trace, strings.ToLower(pattern)) {
 			return true
 		}
 	}
+
 	return false
+}
+
+func defaultRules() []Rule {
+	return []Rule{
+		{
+			Category:     "helm_repository_auth_failure",
+			Required:     []string{"helm", "401 unauthorized"},
+			Any:          []string{"index.yaml", "packages/helm", "failed to fetch"},
+			RootCause:    "The Helm repository could not be accessed because authentication failed.",
+			SuggestedFix: "Check Helm repository credentials, GitLab package registry token, deploy token permissions, and helm repo add configuration in CI variables.",
+			RetrySafe:    false,
+			RiskLevel:    "medium",
+		},
+		{
+			Category:     "kubernetes_helm_rollout_timeout",
+			Required:     []string{"helm", "resource not ready"},
+			Any:          []string{"context deadline exceeded", "deployment", "inprogress", "upgrade failed"},
+			RootCause:    "The Helm deployment failed because a Kubernetes resource did not become ready before the timeout.",
+			SuggestedFix: "Check the target Deployment pods, events, readiness probes, image pull status, resource limits, and application logs. Increase Helm timeout only after confirming the app is healthy but slow.",
+			RetrySafe:    false,
+			RiskLevel:    "high",
+		},
+		{
+			Category:     "go_dependency_download_failure",
+			Required:     []string{"go mod download"},
+			Any:          []string{"exit code: 1", "failed to solve", "did not complete successfully"},
+			RootCause:    "The Docker build failed while running 'go mod download'. This is usually caused by private module access, network/DNS problems, invalid Go module configuration, or missing Git credentials inside the Docker build context.",
+			SuggestedFix: "Check GOPRIVATE, Git credentials for private Go modules, go.mod module paths, network access from the runner, and whether the Dockerfile has access to required credentials during 'go mod download'.",
+			RetrySafe:    true,
+			RiskLevel:    "medium",
+		},
+		{
+			Category:     "docker_build_failure",
+			Required:     []string{"failed to solve"},
+			Any:          []string{"dockerfile", "did not complete successfully", "failed to build", "error:"},
+			RootCause:    "The Docker image build failed.",
+			SuggestedFix: "Check the Dockerfile step shown in the error, required files in build context, base image availability, dependency installation, and build arguments.",
+			RetrySafe:    false,
+			RiskLevel:    "medium",
+		},
+		{
+			Category:     "runner_disk_full",
+			Required:     []string{"no space left on device"},
+			RootCause:    "The GitLab runner or Docker environment appears to be out of disk space.",
+			SuggestedFix: "Clean Docker images, build cache, artifacts, temporary files, or expand the runner disk. Retry after freeing disk space.",
+			RetrySafe:    true,
+			RiskLevel:    "medium",
+		},
+		{
+			Category:     "registry_auth_failure",
+			Required:     []string{},
+			Any:          []string{"unauthorized: authentication required", "denied: requested access to the resource is denied"},
+			RootCause:    "The job failed because Docker registry authentication or permission was rejected.",
+			SuggestedFix: "Check registry credentials, deploy token, CI_REGISTRY_USER, CI_REGISTRY_PASSWORD, image repository path, and project registry permissions.",
+			RetrySafe:    false,
+			RiskLevel:    "medium",
+		},
+		{
+			Category:     "runner_docker_daemon_failure",
+			Required:     []string{"cannot connect to the docker daemon"},
+			RootCause:    "The job could not connect to Docker daemon on the runner.",
+			SuggestedFix: "Check runner executor type, Docker service status, socket permissions, and privileged mode if using Docker-in-Docker.",
+			RetrySafe:    false,
+			RiskLevel:    "medium",
+		},
+		{
+			Category:     "frontend_dependency_or_build_failure",
+			Required:     []string{},
+			Any:          []string{"npm err!", "pnpm", "yarn error"},
+			RootCause:    "The frontend dependency installation or build command failed.",
+			SuggestedFix: "Check Node.js version, package lock file, package registry access, dependency versions, and the exact build output.",
+			RetrySafe:    false,
+			RiskLevel:    "low",
+		},
+		{
+			Category:     "frontend_typescript_failure",
+			Required:     []string{},
+			Any:          []string{"typescript error", "ts error", "type error"},
+			RootCause:    "The frontend build failed due to a TypeScript/type-checking error.",
+			SuggestedFix: "Fix the TypeScript error in the source code or update the related type definitions.",
+			RetrySafe:    false,
+			RiskLevel:    "low",
+		},
+		{
+			Category:     "go_test_failure",
+			Required:     []string{},
+			Any:          []string{"go test", "--- fail:", "fail\t"},
+			RootCause:    "One or more Go tests failed.",
+			SuggestedFix: "Inspect the failing test names and recent code changes. Retry only if the failure is known to be flaky.",
+			RetrySafe:    false,
+			RiskLevel:    "low",
+		},
+		{
+			Category:     "java_build_failure",
+			Required:     []string{},
+			Any:          []string{"mvn", "gradle", "build failed"},
+			RootCause:    "The Java/Maven/Gradle build failed.",
+			SuggestedFix: "Check dependency resolution, test failures, JDK version, Gradle/Maven settings, and repository access.",
+			RetrySafe:    false,
+			RiskLevel:    "low",
+		},
+		{
+			Category:     "kubernetes_image_pull_failure",
+			Required:     []string{},
+			Any:          []string{"imagepullbackoff", "errimagepull"},
+			RootCause:    "Kubernetes could not pull the container image.",
+			SuggestedFix: "Check image tag, registry access, imagePullSecrets, and whether the image was pushed successfully.",
+			RetrySafe:    false,
+			RiskLevel:    "high",
+		},
+		{
+			Category:     "ssh_deploy_auth_failure",
+			Required:     []string{},
+			Any:          []string{"permission denied (publickey)", "ssh: handshake failed"},
+			RootCause:    "The direct server deployment failed because SSH authentication failed.",
+			SuggestedFix: "Check SSH private key, deploy user, authorized_keys, known_hosts, and GitLab CI variables.",
+			RetrySafe:    false,
+			RiskLevel:    "medium",
+		},
+		{
+			Category:     "network_or_dns_failure",
+			Required:     []string{},
+			Any:          []string{"connection timed out", "i/o timeout", "temporary failure in name resolution"},
+			RootCause:    "The job failed due to a network, DNS, or connectivity problem.",
+			SuggestedFix: "Check runner network, DNS, proxy, firewall, registry access, and target service availability.",
+			RetrySafe:    true,
+			RiskLevel:    "medium",
+		},
+	}
 }
 
 func extractEvidence(trace string) []string {
 	lines := strings.Split(trace, "\n")
 
 	var evidence []string
+	seen := map[string]bool{}
+
 	keywords := []string{
 		"error",
 		"failed",
@@ -138,15 +229,32 @@ func extractEvidence(trace string) []string {
 		"permission denied",
 		"crashloopbackoff",
 		"imagepullbackoff",
+		"errimagepull",
+		"context deadline exceeded",
+		"go mod download",
+		"failed to solve",
+		"resource not ready",
+		"upgrade failed",
+		"401 unauthorized",
 	}
 
 	for _, line := range lines {
-		lower := strings.ToLower(line)
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		lower := strings.ToLower(trimmed)
+
+		if strings.HasPrefix(lower, "section_start:") || strings.HasPrefix(lower, "section_end:") {
+			continue
+		}
+
 		for _, keyword := range keywords {
 			if strings.Contains(lower, keyword) {
-				trimmed := strings.TrimSpace(line)
-				if trimmed != "" {
+				if !seen[trimmed] {
 					evidence = append(evidence, trimmed)
+					seen[trimmed] = true
 				}
 				break
 			}
@@ -174,9 +282,16 @@ func tail(lines []string, n int) []string {
 
 	for _, line := range lines[start:] {
 		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			out = append(out, trimmed)
+		if trimmed == "" {
+			continue
 		}
+
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "section_start:") || strings.HasPrefix(lower, "section_end:") {
+			continue
+		}
+
+		out = append(out, trimmed)
 	}
 
 	return out
