@@ -74,5 +74,5 @@ deploy:
       --kube-context "$KUBECONTEXT" \
       --namespace agentops \
       --set image.registry="$REGISTRY" \
-      --set image.repository="$CI_PROJECT_PATH" \
+      --set image.repository="$REGISTRY/$CI_PROJECT_PATH" \
       --set image.tag="$IMAGE_TAG"
