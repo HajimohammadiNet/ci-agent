@@ -16,14 +16,15 @@ type Runner struct {
 }
 
 type Job struct {
-	ID           int64    `json:"id"`
-	Name         string   `json:"name"`
-	Stage        string   `json:"stage"`
-	Status       string   `json:"status"`
-	AllowFailure bool     `json:"allow_failure"`
-	WebURL       string   `json:"web_url"`
-	TagList      []string `json:"tag_list"`
-	Runner       *Runner  `json:"runner"`
+	ID           int64     `json:"id"`
+	Name         string    `json:"name"`
+	Stage        string    `json:"stage"`
+	Status       string    `json:"status"`
+	AllowFailure bool      `json:"allow_failure"`
+	WebURL       string    `json:"web_url"`
+	TagList      []string  `json:"tag_list"`
+	Runner       *Runner   `json:"runner"`
+	Pipeline     *Pipeline `json:"pipeline"`
 }
 
 type JobAnalysis struct {

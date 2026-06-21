@@ -157,3 +157,19 @@ func (c *Client) GetJobTrace(ctx context.Context, projectID string, jobID int64)
 
 	return string(data), nil
 }
+
+func (c *Client) GetJob(ctx context.Context, projectID string, jobID int64) (*models.Job, error) {
+	path := fmt.Sprintf("/projects/%s/jobs/%d", projectPath(projectID), jobID)
+
+	req, err := c.newRequest(ctx, http.MethodGet, path)
+	if err != nil {
+		return nil, err
+	}
+
+	var job models.Job
+	if err := c.doJSON(req, &job); err != nil {
+		return nil, err
+	}
+
+	return &job, nil
+}
