@@ -1,0 +1,14 @@
+apiVersion: v2
+name: ci-agent
+description: Internal AI-powered CI/CD failure analysis agent for GitLab pipelines
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - agentops
+  - cicd
+  - gitlab
+  - agent
+  - devops
+maintainers:
+  - name: AgentOps Team

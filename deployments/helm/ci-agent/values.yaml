@@ -1,0 +1,143 @@
+replicaCount: 1
+
+image:
+  repository: registry.rahkar.team/agentops/ci-agent
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# Example:
+# imagePullSecrets:
+#   - name: registry-credentials
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+containerPort: 8080
+
+config:
+  gitlabUrl: "https://gitlab.rahkar.team"
+
+secret:
+  # Recommended for production:
+  # create: false
+  # existingSecret: ci-agent-secret
+  create: true
+  existingSecret: ""
+
+  keys:
+    gitlabToken: GITLAB_TOKEN
+    apiToken: CI_AGENT_API_TOKEN
+
+  values:
+    gitlabToken: ""
+    apiToken: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: http
+  annotations: {}
+
+ingress:
+  enabled: true
+  className: kong
+
+  annotations:
+    konghq.com/strip-path: "false"
+    konghq.com/preserve-host: "true"
+
+  hosts:
+    - host: ci-agent.rahkar.team
+      paths:
+        - path: /
+          pathType: Prefix
+
+  tls: []
+  # Example:
+  # tls:
+  #   - secretName: ci-agent-tls
+  #     hosts:
+  #       - ci-agent.rahkar.team
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 20
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readiness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  startup:
+    enabled: true
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 12
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: false
+
+  # If you enable this in a cluster with default-deny policies,
+  # restrict ingress from Kong namespace/pods according to your cluster labels.
+  ingress:
+    allowFromAllNamespaces: true
+
+  egress:
+    allowAll: true
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

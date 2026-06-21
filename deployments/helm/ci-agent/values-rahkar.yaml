@@ -1,0 +1,58 @@
+replicaCount: 1
+
+image:
+  repository: registry.rahkar.team/agentops/ci-agent
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+config:
+  gitlabUrl: "https://gitlab.rahkar.team"
+  gitlabHttpTimeout: "120s"
+
+secret:
+  create: false
+  existingSecret: ci-agent-secret
+  keys:
+    gitlabToken: GITLAB_TOKEN
+    apiToken: CI_AGENT_API_TOKEN
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: kong
+  annotations:
+    konghq.com/strip-path: "false"
+    konghq.com/preserve-host: "true"
+  hosts:
+    - host: ci-agent.rahkar.team
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # If TLS is terminated at Kong/HAProxy and cert is managed elsewhere, keep tls empty.
+  # If Kubernetes TLS secret is used:
+  # tls:
+  #   - secretName: ci-agent-tls
+  #     hosts:
+  #       - ci-agent.rahkar.team
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: false
