@@ -1,0 +1,24 @@
+# Go
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.out
+
+# Build output
+ci-agent
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Logs
+*.log
