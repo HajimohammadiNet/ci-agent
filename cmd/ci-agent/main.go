@@ -8,11 +8,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hajimohammadinet/ci-agent/internal/agent"
+	"github.com/hajimohammadinet/ci-agent/internal/ai"
 	"github.com/hajimohammadinet/ci-agent/internal/gitlab"
+	"github.com/hajimohammadinet/ci-agent/internal/llm/openrouter"
 	"github.com/hajimohammadinet/ci-agent/internal/models"
 	"github.com/hajimohammadinet/ci-agent/internal/reporter"
 )
@@ -51,18 +54,13 @@ func runAnalyze(args []string) {
 	projectIDFlag := fs.String("project-id", "", "GitLab project ID or project path")
 	pipelineIDFlag := fs.Int64("pipeline-id", 0, "GitLab pipeline ID")
 	urlFlag := fs.String("url", "", "GitLab pipeline or job URL")
-	formatFlag := fs.String("format", "json", "Output format: json, markdown, md, text")
+	formatFlag := fs.String("format", "json", "Output format: json, summary, short, markdown, md, text, full")
 
 	_ = fs.Parse(args)
 
 	service, err := newAgentService()
 	if err != nil {
 		exitErr("init agent failed", err)
-	}
-
-	apiToken := os.Getenv("CI_AGENT_API_TOKEN")
-	if apiToken == "" {
-		exitErr("missing api token", fmt.Errorf("CI_AGENT_API_TOKEN env var is required in serve mode"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -92,23 +90,14 @@ func runServe(args []string) {
 		exitErr("init agent failed", err)
 	}
 
-	apiToken := os.Getenv("CI_AGENT_API_TOKEN")
+	apiToken := strings.TrimSpace(os.Getenv("CI_AGENT_API_TOKEN"))
 	if apiToken == "" {
 		exitErr("missing api token", fmt.Errorf("CI_AGENT_API_TOKEN env var is required in serve mode"))
 	}
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
+	mux.HandleFunc("/healthz", healthzHandler)
 
 	analyzeHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -155,6 +144,17 @@ func runServe(args []string) {
 	}
 }
 
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
 func requireBearerToken(next http.HandlerFunc, token string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token == "" {
@@ -162,7 +162,7 @@ func requireBearerToken(next http.HandlerFunc, token string) http.HandlerFunc {
 			return
 		}
 
-		authHeader := r.Header.Get("Authorization")
+		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 		expected := "Bearer " + token
 
 		if authHeader != expected {
@@ -175,8 +175,8 @@ func requireBearerToken(next http.HandlerFunc, token string) http.HandlerFunc {
 }
 
 func newAgentService() (*agent.Service, error) {
-	gitlabURL := os.Getenv("GITLAB_URL")
-	gitlabToken := os.Getenv("GITLAB_TOKEN")
+	gitlabURL := strings.TrimSpace(os.Getenv("GITLAB_URL"))
+	gitlabToken := strings.TrimSpace(os.Getenv("GITLAB_TOKEN"))
 
 	if gitlabURL == "" || gitlabToken == "" {
 		return nil, fmt.Errorf("GITLAB_URL and GITLAB_TOKEN env vars are required")
@@ -184,7 +184,44 @@ func newAgentService() (*agent.Service, error) {
 
 	client := gitlab.NewClient(gitlabURL, gitlabToken)
 
-	return agent.NewService(client), nil
+	aiAnalyzer := buildAIAnalyzer()
+
+	return agent.NewService(client, aiAnalyzer), nil
+}
+
+func buildAIAnalyzer() *ai.Analyzer {
+	enabled := getenvBool("AI_ENABLED", false)
+	if !enabled {
+		return ai.NewAnalyzer(false, nil)
+	}
+
+	providerName := strings.ToLower(strings.TrimSpace(os.Getenv("AI_PROVIDER")))
+	if providerName == "" {
+		providerName = "openrouter"
+	}
+
+	switch providerName {
+	case "openrouter":
+		provider, err := openrouter.New(openrouter.Config{
+			APIKey:      os.Getenv("OPENROUTER_API_KEY"),
+			Model:       getenvDefault("OPENROUTER_MODEL", "deepseek/deepseek-v4-pro"),
+			BaseURL:     getenvDefault("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
+			Timeout:     getenvDuration("OPENROUTER_TIMEOUT", 60*time.Second),
+			MaxEvidence: getenvInt("OPENROUTER_MAX_EVIDENCE", 40),
+			AppTitle:    getenvDefault("OPENROUTER_APP_TITLE", "ci-agent"),
+			AppReferer:  os.Getenv("OPENROUTER_HTTP_REFERER"),
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "AI disabled: %v\n", err)
+			return ai.NewAnalyzer(false, nil)
+		}
+
+		return ai.NewAnalyzer(true, provider)
+
+	default:
+		fmt.Fprintf(os.Stderr, "AI disabled: unsupported provider %q\n", providerName)
+		return ai.NewAnalyzer(false, nil)
+	}
 }
 
 func printReport(report *models.PipelineAnalysis, format string) {
@@ -270,17 +307,86 @@ func exitErr(msg string, err error) {
 
 func printUsageAndExit() {
 	fmt.Println("Usage:")
-	fmt.Println("  ci-agent analyze --url <gitlab_pipeline_or_job_url> [--format json|summary|markdown|md|text]")
-	fmt.Println("  ci-agent analyze --project-id <project_id_or_path> --pipeline-id <pipeline_id> [--format json|summary|markdown|md|text]")
+	fmt.Println("  ci-agent analyze --url <gitlab_pipeline_or_job_url> [--format json|summary|short|markdown|md|text|full]")
+	fmt.Println("  ci-agent analyze --project-id <project_id_or_path> --pipeline-id <pipeline_id> [--format json|summary|short|markdown|md|text|full]")
 	fmt.Println("  ci-agent serve [--listen :8080]")
 	fmt.Println("")
 	fmt.Println("Environment:")
 	fmt.Println("  GITLAB_URL=https://gitlab.example.com")
 	fmt.Println("  GITLAB_TOKEN=<token>")
+	fmt.Println("  GITLAB_HTTP_TIMEOUT=120s")
+	fmt.Println("")
+	fmt.Println("HTTP server:")
+	fmt.Println("  CI_AGENT_API_TOKEN=<token>")
+	fmt.Println("")
+	fmt.Println("AI / OpenRouter:")
+	fmt.Println("  AI_ENABLED=false")
+	fmt.Println("  AI_PROVIDER=openrouter")
+	fmt.Println("  OPENROUTER_API_KEY=<token>")
+	fmt.Println("  OPENROUTER_MODEL=deepseek/deepseek-v4-pro")
+	fmt.Println("  OPENROUTER_BASE_URL=https://openrouter.ai/api/v1/chat/completions")
+	fmt.Println("  OPENROUTER_TIMEOUT=60s")
+	fmt.Println("  OPENROUTER_MAX_EVIDENCE=40")
+	fmt.Println("  OPENROUTER_APP_TITLE=ci-agent")
+	fmt.Println("  OPENROUTER_HTTP_REFERER=")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  ci-agent analyze --url https://gitlab.example.com/group/project/-/pipelines/9876")
-	fmt.Println("  ci-agent analyze --url https://gitlab.example.com/group/project/-/jobs/12345 --format markdown")
+	fmt.Println("  ci-agent analyze --url https://gitlab.example.com/group/project/-/jobs/12345 --format summary")
+	fmt.Println("  ci-agent analyze --url https://gitlab.example.com/group/project/-/jobs/12345 --format full")
 	fmt.Println("  ci-agent serve --listen :8080")
 	os.Exit(1)
+}
+
+func getenvDefault(key string, def string) string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+
+	return v
+}
+
+func getenvBool(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+
+	switch v {
+	case "1", "true", "yes", "y", "enabled":
+		return true
+	case "0", "false", "no", "n", "disabled":
+		return false
+	default:
+		return def
+	}
+}
+
+func getenvInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+
+	return i
+}
+
+func getenvDuration(key string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return def
+	}
+
+	return d
 }

@@ -31,6 +31,10 @@ func Markdown(report models.PipelineAnalysis) string {
 	fmt.Fprintf(&b, "**Failed jobs:** `%d`\n\n", len(report.Jobs))
 	fmt.Fprintf(&b, "**Findings:** `%d`\n\n", totalFindings)
 
+	if report.AI != nil {
+		writeAIMarkdownSection(&b, report.AI)
+	}
+
 	if len(report.Jobs) == 0 {
 		fmt.Fprintf(&b, "---\n\n")
 		fmt.Fprintf(&b, "No failed jobs were found in this pipeline.\n")
@@ -38,12 +42,19 @@ func Markdown(report models.PipelineAnalysis) string {
 	}
 
 	fmt.Fprintf(&b, "---\n\n")
+	fmt.Fprintf(&b, "## Rule-Based Findings\n\n")
 
 	for _, job := range report.Jobs {
 		fmt.Fprintf(&b, "### Failed Job: `%s`\n\n", job.JobName)
 		fmt.Fprintf(&b, "- **Stage:** `%s`\n", job.Stage)
 		fmt.Fprintf(&b, "- **Job ID:** `%d`\n", job.JobID)
 		fmt.Fprintf(&b, "- **Findings:** `%d`\n\n", len(job.Findings))
+
+		if len(job.Findings) == 0 {
+			fmt.Fprintf(&b, "No rule-based findings detected for this job.\n\n")
+			fmt.Fprintf(&b, "---\n\n")
+			continue
+		}
 
 		for i, finding := range job.Findings {
 			fmt.Fprintf(&b, "#### %d. %s `%s`\n\n", i+1, riskIcon(finding.RiskLevel), finding.Category)
@@ -74,8 +85,54 @@ func Markdown(report models.PipelineAnalysis) string {
 	return b.String()
 }
 
+func writeAIMarkdownSection(b *strings.Builder, ai *models.AIAnalysis) {
+	fmt.Fprintf(b, "## 🤖 AI Analysis\n\n")
+
+	if strings.TrimSpace(ai.Summary) != "" {
+		fmt.Fprintf(b, "**Summary:**\n\n%s\n\n", ai.Summary)
+	}
+
+	if strings.TrimSpace(ai.PrimaryCause) != "" {
+		fmt.Fprintf(b, "**Primary cause:**\n\n%s\n\n", ai.PrimaryCause)
+	}
+
+	if len(ai.SecondaryCauses) > 0 {
+		fmt.Fprintf(b, "**Secondary causes:**\n\n")
+		for _, cause := range ai.SecondaryCauses {
+			cause = strings.TrimSpace(cause)
+			if cause == "" {
+				continue
+			}
+			fmt.Fprintf(b, "- %s\n", cause)
+		}
+		fmt.Fprintf(b, "\n")
+	}
+
+	if len(ai.RecommendedSteps) > 0 {
+		fmt.Fprintf(b, "**Recommended next steps:**\n\n")
+		for i, step := range ai.RecommendedSteps {
+			step = strings.TrimSpace(step)
+			if step == "" {
+				continue
+			}
+			fmt.Fprintf(b, "%d. %s\n", i+1, step)
+		}
+		fmt.Fprintf(b, "\n")
+	}
+
+	if strings.TrimSpace(ai.OwnerHint) != "" {
+		fmt.Fprintf(b, "**Owner hint:** `%s`\n\n", ai.OwnerHint)
+	}
+
+	if strings.TrimSpace(ai.Confidence) != "" {
+		fmt.Fprintf(b, "**AI confidence:** `%s`\n\n", ai.Confidence)
+	}
+
+	fmt.Fprintf(b, "---\n\n")
+}
+
 func statusIcon(status string) string {
-	switch strings.ToLower(status) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "success", "passed":
 		return "✅"
 	case "failed":
@@ -90,7 +147,7 @@ func statusIcon(status string) string {
 }
 
 func riskIcon(risk string) string {
-	switch strings.ToLower(risk) {
+	switch strings.ToLower(strings.TrimSpace(risk)) {
 	case "high":
 		return "🔴"
 	case "medium":
@@ -103,6 +160,8 @@ func riskIcon(risk string) string {
 }
 
 func shortSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+
 	if len(sha) <= 8 {
 		return sha
 	}
@@ -113,7 +172,7 @@ func shortSHA(sha string) string {
 func truncate(input string, max int) string {
 	input = strings.TrimSpace(input)
 
-	if len(input) <= max {
+	if max <= 0 || len(input) <= max {
 		return input
 	}
 

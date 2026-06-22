@@ -42,6 +42,7 @@ type PipelineAnalysis struct {
 	SHA        string        `json:"sha"`
 	WebURL     string        `json:"web_url"`
 	Jobs       []JobAnalysis `json:"jobs"`
+	AI         *AIAnalysis   `json:"ai,omitempty"`
 }
 
 type Finding struct {
@@ -51,4 +52,13 @@ type Finding struct {
 	SuggestedFix string   `json:"suggested_fix"`
 	RetrySafe    bool     `json:"retry_safe"`
 	RiskLevel    string   `json:"risk_level"`
+}
+
+type AIAnalysis struct {
+	Summary          string   `json:"summary"`
+	PrimaryCause     string   `json:"primary_cause"`
+	SecondaryCauses  []string `json:"secondary_causes"`
+	RecommendedSteps []string `json:"recommended_steps"`
+	OwnerHint        string   `json:"owner_hint"`
+	Confidence       string   `json:"confidence"`
 }
