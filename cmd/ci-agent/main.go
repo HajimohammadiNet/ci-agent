@@ -194,6 +194,9 @@ func printReport(report *models.PipelineAnalysis, format string) {
 	case "json":
 		printJSON(report)
 
+	case "summary":
+		fmt.Print(reporter.Summary(*report))
+
 	case "markdown":
 		fmt.Print(reporter.Markdown(*report))
 
@@ -212,6 +215,11 @@ func writeReport(w http.ResponseWriter, report *models.PipelineAnalysis, format 
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(report)
 
+	case "summary":
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(reporter.Summary(*report)))
+
 	case "markdown":
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -229,7 +237,10 @@ func normalizeFormat(format string) string {
 	case "", "json":
 		return "json"
 
-	case "markdown", "md", "text":
+	case "summary", "short":
+		return "summary"
+
+	case "markdown", "md", "text", "full":
 		return "markdown"
 
 	default:
@@ -259,8 +270,8 @@ func exitErr(msg string, err error) {
 
 func printUsageAndExit() {
 	fmt.Println("Usage:")
-	fmt.Println("  ci-agent analyze --url <gitlab_pipeline_or_job_url> [--format json|markdown|md|text]")
-	fmt.Println("  ci-agent analyze --project-id <project_id_or_path> --pipeline-id <pipeline_id> [--format json|markdown|md|text]")
+	fmt.Println("  ci-agent analyze --url <gitlab_pipeline_or_job_url> [--format json|summary|markdown|md|text]")
+	fmt.Println("  ci-agent analyze --project-id <project_id_or_path> --pipeline-id <pipeline_id> [--format json|summary|markdown|md|text]")
 	fmt.Println("  ci-agent serve [--listen :8080]")
 	fmt.Println("")
 	fmt.Println("Environment:")
