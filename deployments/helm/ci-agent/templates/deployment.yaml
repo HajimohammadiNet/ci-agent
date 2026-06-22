@@ -61,7 +61,37 @@ spec:
                 secretKeyRef:
                   name: {{ include "ci-agent.secretName" . }}
                   key: {{ .Values.secret.keys.apiToken }}
-          {{- if .Values.probes.liveness.enabled }}
+            - name: AI_ENABLED
+              value: {{ .Values.ai.enabled | quote }}
+
+            - name: AI_PROVIDER
+              value: {{ .Values.ai.provider | quote }}
+
+            - name: OPENROUTER_MODEL
+              value: {{ .Values.openrouter.model | quote }}
+
+            - name: OPENROUTER_BASE_URL
+              value: {{ .Values.openrouter.baseUrl | quote }}
+
+            - name: OPENROUTER_TIMEOUT
+              value: {{ .Values.openrouter.timeout | quote }}
+
+            - name: OPENROUTER_MAX_EVIDENCE
+              value: {{ .Values.openrouter.maxEvidence | quote }}
+
+            - name: OPENROUTER_APP_TITLE
+              value: {{ .Values.openrouter.appTitle | quote }}
+
+            - name: OPENROUTER_HTTP_REFERER
+              value: {{ .Values.openrouter.httpReferer | quote }}
+
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.openrouter.existingSecret | quote }}
+                  key: {{ .Values.openrouter.secretKey | quote }}
+                      {{- if .Values.probes.liveness.enabled }}
+                      
           livenessProbe:
             httpGet:
               path: /healthz
