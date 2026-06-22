@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -113,6 +114,14 @@ func runServe(args []string) {
 			return
 		}
 
+		log.Printf(
+			"analyze request url=%q project_id=%q pipeline_id=%d format=%q",
+			req.URL,
+			req.ProjectID,
+			req.PipelineID,
+			req.Format,
+		)
+
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 
@@ -122,14 +131,23 @@ func runServe(args []string) {
 			PipelineID: req.PipelineID,
 		})
 		if err != nil {
+			log.Printf("analyze failed: %v", err)
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
+		log.Printf(
+			"analyze completed project_id=%s pipeline_id=%d jobs=%d ai_enabled=%t",
+			report.ProjectID,
+			report.PipelineID,
+			len(report.Jobs),
+			report.AI != nil,
+		)
+
 		writeReport(w, report, req.Format)
 	}
 
-	mux.HandleFunc("/api/v1/analyze", requireBearerToken(analyzeHandler, apiToken))
+	mux.HandleFunc("/api/v1/analyze", logRequests(requireBearerToken(analyzeHandler, apiToken)))
 
 	server := &http.Server{
 		Addr:              *listenAddr,
@@ -389,4 +407,59 @@ func getenvDuration(key string, def time.Duration) time.Duration {
 	}
 
 	return d
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(data []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+
+	n, err := r.ResponseWriter.Write(data)
+	r.bytes += n
+	return n, err
+}
+
+func logRequests(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		rec := &statusRecorder{
+			ResponseWriter: w,
+			status:         0,
+		}
+
+		log.Printf(
+			"request started method=%s path=%s remote=%s",
+			r.Method,
+			r.URL.Path,
+			r.RemoteAddr,
+		)
+
+		next(rec, r)
+
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+
+		log.Printf(
+			"request completed method=%s path=%s status=%d bytes=%d duration=%s",
+			r.Method,
+			r.URL.Path,
+			status,
+			rec.bytes,
+			time.Since(start),
+		)
+	}
 }
