@@ -24,9 +24,9 @@ ai:
   provider: openrouter
 
 openrouter:
-  model: deepseek/deepseek-v4-pro
+  model: qwen/qwen3.7-plus
   baseUrl: https://openrouter.ai/api/v1/chat/completions
-  timeout: 60s
+  timeout: 30s
   maxEvidence: 40
   appTitle: ci-agent
   httpReferer: ""
@@ -43,6 +43,9 @@ ingress:
   annotations:
     konghq.com/strip-path: "false"
     konghq.com/preserve-host: "true"
+    konghq.com/connect-timeout: "60000"
+    konghq.com/read-timeout: "120000"
+    konghq.com/write-timeout: "120000"
   hosts:
     - host: ci-agent.rahkar.team
       paths:
