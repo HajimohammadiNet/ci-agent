@@ -5,20 +5,6 @@ image:
   tag: "0.3.0"
   pullPolicy: IfNotPresent
 
-ai:
-  enabled: true
-  provider: openrouter
-
-openrouter:
-  model: deepseek/deepseek-v4-pro
-  baseUrl: https://openrouter.ai/api/v1/chat/completions
-  timeout: 60s
-  maxEvidence: 40
-  appTitle: ci-agent
-  httpReferer: ""
-  existingSecret: ci-agent-openrouter-secret
-  secretKey: OPENROUTER_API_KEY
-
 imagePullSecrets:
   - name: regcred
 
@@ -32,6 +18,20 @@ secret:
   keys:
     gitlabToken: GITLAB_TOKEN
     apiToken: CI_AGENT_API_TOKEN
+
+ai:
+  enabled: true
+  provider: openrouter
+
+openrouter:
+  model: deepseek/deepseek-v4-pro
+  baseUrl: https://openrouter.ai/api/v1/chat/completions
+  timeout: 60s
+  maxEvidence: 40
+  appTitle: ci-agent
+  httpReferer: ""
+  existingSecret: ci-agent-openrouter-secret
+  secretKey: OPENROUTER_API_KEY
 
 service:
   type: ClusterIP

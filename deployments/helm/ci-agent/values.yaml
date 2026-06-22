@@ -44,19 +44,28 @@ config:
   gitlabUrl: "https://gitlab.rahkar.team"
 
 secret:
-  # Recommended for production:
-  # create: false
-  # existingSecret: ci-agent-secret
-  create: true
-  existingSecret: ""
-
+  create: false
+  existingSecret: ci-agent-secret
   keys:
     gitlabToken: GITLAB_TOKEN
     apiToken: CI_AGENT_API_TOKEN
-
   values:
     gitlabToken: ""
     apiToken: ""
+
+ai:
+  enabled: false
+  provider: openrouter
+
+openrouter:
+  model: deepseek/deepseek-v4-pro
+  baseUrl: https://openrouter.ai/api/v1/chat/completions
+  timeout: 60s
+  maxEvidence: 40
+  appTitle: ci-agent
+  httpReferer: ""
+  existingSecret: ""
+  secretKey: OPENROUTER_API_KEY
 
 service:
   type: ClusterIP
