@@ -57,7 +57,7 @@ ai:
   enabled: false
   provider: openrouter
 
-openrouter:
+penrouter:
   model: deepseek/deepseek-v4-pro
   baseUrl: https://openrouter.ai/api/v1/chat/completions
   timeout: 75s
@@ -79,7 +79,10 @@ openrouter:
   premiumFallbackTimeout: 60s
   premiumFallbackMaxEvidence: 15
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 883d5e5 (Remove internal deployment files from public repository)
 service:
   type: ClusterIP
   port: 8080
