@@ -100,6 +100,24 @@ spec:
             - name: OPENROUTER_PREMIUM_MAX_EVIDENCE
               value: {{ default 25 $openrouter.premiumMaxEvidence | quote }}
 
+            - name: OPENROUTER_FALLBACK_MODEL
+              value: {{ default "" $openrouter.fallbackModel | quote }}
+
+            - name: OPENROUTER_FALLBACK_TIMEOUT
+              value: {{ default "45s" $openrouter.fallbackTimeout | quote }}
+
+            - name: OPENROUTER_FALLBACK_MAX_EVIDENCE
+              value: {{ default 10 $openrouter.fallbackMaxEvidence | quote }}
+
+            - name: OPENROUTER_PREMIUM_FALLBACK_MODEL
+              value: {{ default "" $openrouter.premiumFallbackModel | quote }}
+
+            - name: OPENROUTER_PREMIUM_FALLBACK_TIMEOUT
+              value: {{ default "60s" $openrouter.premiumFallbackTimeout | quote }}
+
+            - name: OPENROUTER_PREMIUM_FALLBACK_MAX_EVIDENCE
+              value: {{ default 15 $openrouter.premiumFallbackMaxEvidence | quote }}
+
             {{- if and (default false $ai.enabled) (eq (default "openrouter" $ai.provider) "openrouter") }}
             - name: OPENROUTER_API_KEY
               valueFrom:

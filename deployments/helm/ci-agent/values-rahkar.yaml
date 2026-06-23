@@ -32,10 +32,19 @@ openrouter:
   httpReferer: ""
   existingSecret: ci-agent-openrouter-secret
   secretKey: OPENROUTER_API_KEY
+
+  fallbackModel: qwen/qwen3.7-plus
+  fallbackTimeout: 45s
+  fallbackMaxEvidence: 10
+
   premiumModel: deepseek/deepseek-v4-pro
   premiumTimeout: 90s
   premiumMaxEvidence: 25
   
+  premiumFallbackModel: qwen/qwen3.7-plus
+  premiumFallbackTimeout: 60s
+  premiumFallbackMaxEvidence: 15
+
 service:
   type: ClusterIP
   port: 8080

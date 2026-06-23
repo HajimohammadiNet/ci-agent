@@ -217,7 +217,7 @@ func newAgentService() (*agent.Service, error) {
 func buildAIAnalyzer() *ai.Analyzer {
 	enabled := getenvBool("AI_ENABLED", false)
 	if !enabled {
-		return ai.NewAnalyzer(false, nil, nil)
+		return ai.NewAnalyzer(false, nil, nil, nil, nil)
 	}
 
 	providerName := strings.ToLower(strings.TrimSpace(os.Getenv("AI_PROVIDER")))
@@ -227,33 +227,37 @@ func buildAIAnalyzer() *ai.Analyzer {
 
 	switch providerName {
 	case "openrouter":
-		standard, err := openrouter.New(openrouter.Config{
-			APIKey:      os.Getenv("OPENROUTER_API_KEY"),
-			Model:       getenvDefault("OPENROUTER_MODEL", "qwen/qwen3.7-plus"),
-			BaseURL:     getenvDefault("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
-			Timeout:     getenvDuration("OPENROUTER_TIMEOUT", 75*time.Second),
-			MaxEvidence: getenvInt("OPENROUTER_MAX_EVIDENCE", 15),
-			AppTitle:    getenvDefault("OPENROUTER_APP_TITLE", "ci-agent"),
-			AppReferer:  os.Getenv("OPENROUTER_HTTP_REFERER"),
-		})
+		standard, err := newOpenRouterProvider(
+			getenvDefault("OPENROUTER_MODEL", "deepseek/deepseek-v4-pro"),
+			getenvDuration("OPENROUTER_TIMEOUT", 75*time.Second),
+			getenvInt("OPENROUTER_MAX_EVIDENCE", 15),
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "AI disabled: %v\n", err)
-			return ai.NewAnalyzer(false, nil, nil)
+			return ai.NewAnalyzer(false, nil, nil, nil, nil)
+		}
+
+		var standardFallback ai.Provider
+		if fallbackModel := strings.TrimSpace(os.Getenv("OPENROUTER_FALLBACK_MODEL")); fallbackModel != "" {
+			p, err := newOpenRouterProvider(
+				fallbackModel,
+				getenvDuration("OPENROUTER_FALLBACK_TIMEOUT", 45*time.Second),
+				getenvInt("OPENROUTER_FALLBACK_MAX_EVIDENCE", 10),
+			)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "AI standard fallback provider disabled: %v\n", err)
+			} else {
+				standardFallback = p
+			}
 		}
 
 		var premium ai.Provider
-
-		premiumModel := strings.TrimSpace(os.Getenv("OPENROUTER_PREMIUM_MODEL"))
-		if premiumModel != "" {
-			p, err := openrouter.New(openrouter.Config{
-				APIKey:      os.Getenv("OPENROUTER_API_KEY"),
-				Model:       premiumModel,
-				BaseURL:     getenvDefault("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
-				Timeout:     getenvDuration("OPENROUTER_PREMIUM_TIMEOUT", 90*time.Second),
-				MaxEvidence: getenvInt("OPENROUTER_PREMIUM_MAX_EVIDENCE", 25),
-				AppTitle:    getenvDefault("OPENROUTER_APP_TITLE", "ci-agent"),
-				AppReferer:  os.Getenv("OPENROUTER_HTTP_REFERER"),
-			})
+		if premiumModel := strings.TrimSpace(os.Getenv("OPENROUTER_PREMIUM_MODEL")); premiumModel != "" {
+			p, err := newOpenRouterProvider(
+				premiumModel,
+				getenvDuration("OPENROUTER_PREMIUM_TIMEOUT", 90*time.Second),
+				getenvInt("OPENROUTER_PREMIUM_MAX_EVIDENCE", 25),
+			)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "AI premium provider disabled: %v\n", err)
 			} else {
@@ -261,12 +265,38 @@ func buildAIAnalyzer() *ai.Analyzer {
 			}
 		}
 
-		return ai.NewAnalyzer(true, standard, premium)
+		var premiumFallback ai.Provider
+		if premiumFallbackModel := strings.TrimSpace(os.Getenv("OPENROUTER_PREMIUM_FALLBACK_MODEL")); premiumFallbackModel != "" {
+			p, err := newOpenRouterProvider(
+				premiumFallbackModel,
+				getenvDuration("OPENROUTER_PREMIUM_FALLBACK_TIMEOUT", 60*time.Second),
+				getenvInt("OPENROUTER_PREMIUM_FALLBACK_MAX_EVIDENCE", 15),
+			)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "AI premium fallback provider disabled: %v\n", err)
+			} else {
+				premiumFallback = p
+			}
+		}
+
+		return ai.NewAnalyzer(true, standard, standardFallback, premium, premiumFallback)
 
 	default:
 		fmt.Fprintf(os.Stderr, "AI disabled: unsupported provider %q\n", providerName)
-		return ai.NewAnalyzer(false, nil, nil)
+		return ai.NewAnalyzer(false, nil, nil, nil, nil)
 	}
+}
+
+func newOpenRouterProvider(model string, timeout time.Duration, maxEvidence int) (ai.Provider, error) {
+	return openrouter.New(openrouter.Config{
+		APIKey:      os.Getenv("OPENROUTER_API_KEY"),
+		Model:       model,
+		BaseURL:     getenvDefault("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
+		Timeout:     timeout,
+		MaxEvidence: maxEvidence,
+		AppTitle:    getenvDefault("OPENROUTER_APP_TITLE", "ci-agent"),
+		AppReferer:  os.Getenv("OPENROUTER_HTTP_REFERER"),
+	})
 }
 
 func writeReport(w http.ResponseWriter, report *models.PipelineAnalysis, format string) {
@@ -358,6 +388,12 @@ func printUsageAndExit() {
 	fmt.Println("  OPENROUTER_PREMIUM_MODEL=")
 	fmt.Println("  OPENROUTER_PREMIUM_TIMEOUT=90s")
 	fmt.Println("  OPENROUTER_PREMIUM_MAX_EVIDENCE=25")
+	fmt.Println("  OPENROUTER_FALLBACK_MODEL=")
+	fmt.Println("  OPENROUTER_FALLBACK_TIMEOUT=45s")
+	fmt.Println("  OPENROUTER_FALLBACK_MAX_EVIDENCE=10")
+	fmt.Println("  OPENROUTER_PREMIUM_FALLBACK_MODEL=")
+	fmt.Println("  OPENROUTER_PREMIUM_FALLBACK_TIMEOUT=60s")
+	fmt.Println("  OPENROUTER_PREMIUM_FALLBACK_MAX_EVIDENCE=15")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  ci-agent analyze --url https://gitlab.example.com/group/project/-/pipelines/9876")
