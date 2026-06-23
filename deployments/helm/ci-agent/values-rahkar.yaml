@@ -24,15 +24,18 @@ ai:
   provider: openrouter
 
 openrouter:
-  model: qwen/qwen3.7-plus
+  model: deepseek/deepseek-v4-pro
   baseUrl: https://openrouter.ai/api/v1/chat/completions
   timeout: 75s
-  maxEvidence: 20
+  maxEvidence: 15
   appTitle: ci-agent
   httpReferer: ""
   existingSecret: ci-agent-openrouter-secret
   secretKey: OPENROUTER_API_KEY
-
+  premiumModel: deepseek/deepseek-v4-pro
+  premiumTimeout: 90s
+  premiumMaxEvidence: 25
+  
 service:
   type: ClusterIP
   port: 8080

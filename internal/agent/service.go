@@ -14,10 +14,11 @@ type AnalyzeRequest struct {
 	URL        string `json:"url"`
 	ProjectID  string `json:"project_id"`
 	PipelineID int64  `json:"pipeline_id"`
+	AIMode     string `json:"ai_mode"`
 }
 
 type AIAnalyzer interface {
-	Analyze(ctx context.Context, report models.PipelineAnalysis) *models.AIAnalysis
+	Analyze(ctx context.Context, report models.PipelineAnalysis, mode string) *models.AIAnalysis
 }
 
 type Service struct {
@@ -87,8 +88,8 @@ func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*models.Pipe
 		report.Jobs = append(report.Jobs, jobAnalysis)
 	}
 
-	if s.ai != nil && shouldRunAI(report) {
-		report.AI = s.ai.Analyze(ctx, *report)
+	if s.ai != nil && shouldRunAI(report, req.AIMode) {
+		report.AI = s.ai.Analyze(ctx, *report, req.AIMode)
 	}
 
 	return report, nil
@@ -163,14 +164,19 @@ func traceFetchFailedJobAnalysis(jobID int64, jobName, stage string, err error) 
 	}
 }
 
-func shouldRunAI(report *models.PipelineAnalysis) bool {
+func shouldRunAI(report *models.PipelineAnalysis, mode string) bool {
 	if report == nil {
 		return false
 	}
 
+	mode = normalizeAIMode(mode)
+	if mode == "off" {
+		return false
+	}
+
 	// Do not spend AI tokens on successful pipelines.
-	if strings.ToLower(strings.TrimSpace(report.Status)) == "success" ||
-		strings.ToLower(strings.TrimSpace(report.Status)) == "passed" {
+	switch strings.ToLower(strings.TrimSpace(report.Status)) {
+	case "success", "passed":
 		return false
 	}
 
@@ -187,4 +193,21 @@ func shouldRunAI(report *models.PipelineAnalysis) bool {
 	}
 
 	return false
+}
+
+func normalizeAIMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+
+	switch mode {
+	case "", "auto":
+		return "auto"
+	case "off", "noai", "none", "false", "disabled":
+		return "off"
+	case "standard", "default":
+		return "standard"
+	case "premium", "pro":
+		return "premium"
+	default:
+		return "auto"
+	}
 }

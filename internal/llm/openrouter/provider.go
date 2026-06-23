@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,16 +14,6 @@ import (
 )
 
 const defaultBaseURL = "https://openrouter.ai/api/v1/chat/completions"
-
-type Provider struct {
-	apiKey      string
-	model       string
-	baseURL     string
-	httpClient  *http.Client
-	maxEvidence int
-	appTitle    string
-	appReferer  string
-}
 
 type Config struct {
 	APIKey      string
@@ -35,97 +25,19 @@ type Config struct {
 	AppReferer  string
 }
 
-func New(cfg Config) (*Provider, error) {
-	if strings.TrimSpace(cfg.APIKey) == "" {
-		return nil, errors.New("openrouter api key is required")
-	}
-
-	if strings.TrimSpace(cfg.Model) == "" {
-		cfg.Model = "deepseek/deepseek-v4-pro"
-	}
-
-	if strings.TrimSpace(cfg.BaseURL) == "" {
-		cfg.BaseURL = defaultBaseURL
-	}
-
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 60 * time.Second
-	}
-
-	if cfg.MaxEvidence <= 0 {
-		cfg.MaxEvidence = 40
-	}
-
-	if cfg.AppTitle == "" {
-		cfg.AppTitle = "ci-agent"
-	}
-
-	return &Provider{
-		apiKey:      cfg.APIKey,
-		model:       cfg.Model,
-		baseURL:     cfg.BaseURL,
-		httpClient:  &http.Client{Timeout: cfg.Timeout},
-		maxEvidence: cfg.MaxEvidence,
-		appTitle:    cfg.AppTitle,
-		appReferer:  cfg.AppReferer,
-	}, nil
+type Provider struct {
+	apiKey      string
+	model       string
+	baseURL     string
+	maxEvidence int
+	appTitle    string
+	appReferer  string
+	client      *http.Client
 }
 
-func (p *Provider) Analyze(ctx context.Context, report models.PipelineAnalysis) (*models.AIAnalysis, error) {
-	payload := p.buildRequest(report)
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal openrouter request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create openrouter request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-OpenRouter-Title", p.appTitle)
-
-	if p.appReferer != "" {
-		req.Header.Set("HTTP-Referer", p.appReferer)
-	}
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("call openrouter: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(resp.Body)
-		return nil, fmt.Errorf("openrouter returned status %d: %s", resp.StatusCode, truncate(errBody.String(), 1000))
-	}
-
-	var out chatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode openrouter response: %w", err)
-	}
-
-	if len(out.Choices) == 0 {
-		return nil, errors.New("openrouter response has no choices")
-	}
-
-	content := strings.TrimSpace(out.Choices[0].Message.Content)
-	if content == "" {
-		return nil, errors.New("openrouter response content is empty")
-	}
-
-	var ai models.AIAnalysis
-	if err := json.Unmarshal([]byte(content), &ai); err != nil {
-		return nil, fmt.Errorf("parse ai json: %w; content=%s", err, truncate(content, 1000))
-	}
-
-	normalizeAI(&ai)
-
-	return &ai, nil
+type message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 type chatCompletionRequest struct {
@@ -136,68 +48,245 @@ type chatCompletionRequest struct {
 	ResponseFormat map[string]interface{} `json:"response_format,omitempty"`
 }
 
-type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
 type chatCompletionResponse struct {
 	ID      string `json:"id"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"message"`
+		Index        int    `json:"index"`
 		FinishReason string `json:"finish_reason"`
+		Message      struct {
+			Role      string          `json:"role"`
+			Content   json.RawMessage `json:"content"`
+			Reasoning json.RawMessage `json:"reasoning,omitempty"`
+			Refusal   json.RawMessage `json:"refusal,omitempty"`
+		} `json:"message"`
 	} `json:"choices"`
-	Usage map[string]interface{} `json:"usage,omitempty"`
+	Error *struct {
+		Message string      `json:"message"`
+		Type    string      `json:"type"`
+		Code    interface{} `json:"code"`
+	} `json:"error,omitempty"`
 }
 
-func (p *Provider) buildRequest(report models.PipelineAnalysis) chatCompletionRequest {
-	systemPrompt := `You are an expert DevOps, SRE, CI/CD and Kubernetes incident analysis assistant.
+func New(cfg Config) (*Provider, error) {
+	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
+	cfg.Model = strings.TrimSpace(cfg.Model)
+	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
 
-You analyze failed GitLab CI/CD pipelines.
+	if cfg.APIKey == "" {
+		return nil, fmt.Errorf("OPENROUTER_API_KEY is required")
+	}
 
-Rules:
-- Use only the provided pipeline data, findings, and evidence.
-- Do not invent logs, commands, services, or facts.
-- Do not expose or reconstruct secrets.
-- Be practical and operational.
-- Prefer concise but useful analysis.
-- Return only valid JSON matching the schema.
-- No markdown.
-- No extra text outside JSON.`
+	if cfg.Model == "" {
+		cfg.Model = "deepseek/deepseek-v4-pro"
+	}
 
-	userPrompt := fmt.Sprintf(`Analyze this failed GitLab CI/CD pipeline.
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = defaultBaseURL
+	}
 
-Pipeline context:
-%s
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 75 * time.Second
+	}
 
-Return:
-- summary: concise human-readable explanation
-- primary_cause: the most likely main root cause
-- secondary_causes: other important causes if any
-- recommended_steps: ordered troubleshooting/fix steps
-- owner_hint: likely responsible team, for example "DevOps", "Backend", "Frontend", "DevOps + Backend"
-- confidence: one of "low", "medium", "high"
+	if cfg.MaxEvidence <= 0 {
+		cfg.MaxEvidence = 15
+	}
 
-Important:
-- Findings are rule-based and may include multiple related failures.
-- Evidence is already redacted.
-- If evidence is not enough, say confidence is low.
-`, buildPipelineContext(report, p.maxEvidence))
+	if strings.TrimSpace(cfg.AppTitle) == "" {
+		cfg.AppTitle = "ci-agent"
+	}
 
-	return chatCompletionRequest{
+	return &Provider{
+		apiKey:      cfg.APIKey,
+		model:       cfg.Model,
+		baseURL:     cfg.BaseURL,
+		maxEvidence: cfg.MaxEvidence,
+		appTitle:    cfg.AppTitle,
+		appReferer:  cfg.AppReferer,
+		client: &http.Client{
+			Timeout: cfg.Timeout,
+		},
+	}, nil
+}
+
+func (p *Provider) Analyze(ctx context.Context, report models.PipelineAnalysis) (*models.AIAnalysis, error) {
+	systemPrompt := `You are a senior DevOps and CI/CD incident analyst.
+
+You receive a structured, redacted GitLab CI/CD failure report.
+Analyze only the provided evidence.
+Do not invent unavailable facts.
+Return a concise JSON object with these exact fields:
+summary, primary_cause, secondary_causes, recommended_steps, owner_hint, confidence.
+
+confidence must be one of: low, medium, high.
+owner_hint should be one of: DevOps, Backend, Frontend, QA, Security, Platform, Unknown.`
+
+	userPrompt := p.buildUserPrompt(report)
+
+	// First try: strict structured output.
+	result, err := p.call(ctx, systemPrompt, userPrompt, true)
+	if err == nil {
+		return result, nil
+	}
+
+	// Second try: some OpenRouter/model routes return empty content with response_format.
+	// Retry without response_format and force JSON in the prompt.
+	fallbackPrompt := userPrompt + `
+
+IMPORTANT:
+Return only a valid JSON object.
+Do not wrap it in markdown.
+Do not include explanations outside JSON.
+The JSON schema is:
+{
+  "summary": "string",
+  "primary_cause": "string",
+  "secondary_causes": ["string"],
+  "recommended_steps": ["string"],
+  "owner_hint": "string",
+  "confidence": "low|medium|high"
+}`
+
+	fallbackResult, fallbackErr := p.call(ctx, systemPrompt, fallbackPrompt, false)
+	if fallbackErr == nil {
+		return fallbackResult, nil
+	}
+
+	return nil, fmt.Errorf("openrouter primary failed: %v; fallback failed: %v", err, fallbackErr)
+}
+
+func (p *Provider) call(ctx context.Context, systemPrompt string, userPrompt string, useResponseFormat bool) (*models.AIAnalysis, error) {
+	reqPayload := chatCompletionRequest{
 		Model:       p.model,
 		Temperature: 0.2,
-		MaxTokens:   800,
+		MaxTokens:   900,
 		Messages: []message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		ResponseFormat: aiResponseFormat(),
 	}
+
+	if useResponseFormat {
+		reqPayload.ResponseFormat = aiResponseFormat()
+	}
+
+	bodyBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal openrouter request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("create openrouter request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	if p.appReferer != "" {
+		httpReq.Header.Set("HTTP-Referer", p.appReferer)
+	}
+
+	if p.appTitle != "" {
+		httpReq.Header.Set("X-Title", p.appTitle)
+	}
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("call openrouter: %w", err)
+	}
+	defer resp.Body.Close()
+
+	rawResp, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read openrouter response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("openrouter status=%d body=%s", resp.StatusCode, truncate(string(rawResp), 1200))
+	}
+
+	var decoded chatCompletionResponse
+	if err := json.Unmarshal(rawResp, &decoded); err != nil {
+		return nil, fmt.Errorf("decode openrouter response: %w body=%s", err, truncate(string(rawResp), 1200))
+	}
+
+	if decoded.Error != nil {
+		return nil, fmt.Errorf("openrouter error type=%s code=%v message=%s", decoded.Error.Type, decoded.Error.Code, decoded.Error.Message)
+	}
+
+	if len(decoded.Choices) == 0 {
+		return nil, fmt.Errorf("openrouter response has no choices body=%s", truncate(string(rawResp), 1200))
+	}
+
+	choice := decoded.Choices[0]
+	content := extractContentText(choice.Message.Content)
+
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf(
+			"openrouter response content is empty model=%s finish_reason=%s raw=%s",
+			p.model,
+			choice.FinishReason,
+			truncate(string(rawResp), 1600),
+		)
+	}
+
+	jsonText := extractJSONObject(content)
+
+	var result models.AIAnalysis
+	if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
+		return nil, fmt.Errorf("decode ai json: %w content=%s", err, truncate(content, 1600))
+	}
+
+	normalizeAIResult(&result)
+
+	return &result, nil
+}
+
+func (p *Provider) buildUserPrompt(report models.PipelineAnalysis) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "Project: %s\n", report.ProjectID)
+	fmt.Fprintf(&b, "Pipeline ID: %d\n", report.PipelineID)
+	fmt.Fprintf(&b, "Status: %s\n", report.Status)
+	fmt.Fprintf(&b, "Ref: %s\n", report.Ref)
+	fmt.Fprintf(&b, "SHA: %s\n", report.SHA)
+	fmt.Fprintf(&b, "URL: %s\n\n", report.WebURL)
+
+	evidenceCount := 0
+
+	for _, job := range report.Jobs {
+		fmt.Fprintf(&b, "Failed job: %s\n", job.JobName)
+		fmt.Fprintf(&b, "Stage: %s\n", job.Stage)
+		fmt.Fprintf(&b, "Job ID: %d\n", job.JobID)
+
+		for _, finding := range job.Findings {
+			fmt.Fprintf(&b, "- Category: %s\n", finding.Category)
+			fmt.Fprintf(&b, "  Root cause: %s\n", finding.RootCause)
+			fmt.Fprintf(&b, "  Suggested fix: %s\n", finding.SuggestedFix)
+			fmt.Fprintf(&b, "  Retry safe: %t\n", finding.RetrySafe)
+			fmt.Fprintf(&b, "  Risk level: %s\n", finding.RiskLevel)
+
+			for _, evidence := range finding.Evidence {
+				if evidenceCount >= p.maxEvidence {
+					continue
+				}
+
+				evidence = strings.TrimSpace(evidence)
+				if evidence == "" {
+					continue
+				}
+
+				fmt.Fprintf(&b, "  Evidence: %s\n", evidence)
+				evidenceCount++
+			}
+		}
+
+		fmt.Fprintf(&b, "\n")
+	}
+
+	return b.String()
 }
 
 func aiResponseFormat() map[string]interface{} {
@@ -209,14 +298,20 @@ func aiResponseFormat() map[string]interface{} {
 			"schema": map[string]interface{}{
 				"type":                 "object",
 				"additionalProperties": false,
+				"required": []string{
+					"summary",
+					"primary_cause",
+					"secondary_causes",
+					"recommended_steps",
+					"owner_hint",
+					"confidence",
+				},
 				"properties": map[string]interface{}{
 					"summary": map[string]interface{}{
-						"type":        "string",
-						"description": "Short explanation of why the pipeline failed.",
+						"type": "string",
 					},
 					"primary_cause": map[string]interface{}{
-						"type":        "string",
-						"description": "Most likely main root cause.",
+						"type": "string",
 					},
 					"secondary_causes": map[string]interface{}{
 						"type": "array",
@@ -231,95 +326,113 @@ func aiResponseFormat() map[string]interface{} {
 						},
 					},
 					"owner_hint": map[string]interface{}{
-						"type":        "string",
-						"description": "Likely owner team.",
+						"type": "string",
 					},
 					"confidence": map[string]interface{}{
 						"type": "string",
-						"enum": []string{"low", "medium", "high"},
+						"enum": []string{
+							"low",
+							"medium",
+							"high",
+						},
 					},
-				},
-				"required": []string{
-					"summary",
-					"primary_cause",
-					"secondary_causes",
-					"recommended_steps",
-					"owner_hint",
-					"confidence",
 				},
 			},
 		},
 	}
 }
 
-func buildPipelineContext(report models.PipelineAnalysis, maxEvidence int) string {
-	var b strings.Builder
+func extractContentText(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
 
-	fmt.Fprintf(&b, "Project: %s\n", report.ProjectID)
-	fmt.Fprintf(&b, "Pipeline ID: %d\n", report.PipelineID)
-	fmt.Fprintf(&b, "Status: %s\n", report.Status)
-	fmt.Fprintf(&b, "Ref: %s\n", report.Ref)
-	fmt.Fprintf(&b, "SHA: %s\n", report.SHA)
-	fmt.Fprintf(&b, "Web URL: %s\n\n", report.WebURL)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
 
-	evidenceCount := 0
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return asString
+	}
 
-	for _, job := range report.Jobs {
-		fmt.Fprintf(&b, "Failed job: %s\n", job.JobName)
-		fmt.Fprintf(&b, "Stage: %s\n", job.Stage)
-		fmt.Fprintf(&b, "Job ID: %d\n", job.JobID)
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
 
-		for _, finding := range job.Findings {
-			fmt.Fprintf(&b, "- Finding category: %s\n", finding.Category)
-			fmt.Fprintf(&b, "  Root cause: %s\n", finding.RootCause)
-			fmt.Fprintf(&b, "  Risk: %s\n", finding.RiskLevel)
-			fmt.Fprintf(&b, "  Retry safe: %t\n", finding.RetrySafe)
-			fmt.Fprintf(&b, "  Suggested fix: %s\n", finding.SuggestedFix)
-
-			for _, ev := range finding.Evidence {
-				if evidenceCount >= maxEvidence {
-					continue
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		var b strings.Builder
+		for _, part := range parts {
+			if strings.TrimSpace(part.Text) != "" {
+				if b.Len() > 0 {
+					b.WriteString("\n")
 				}
-
-				ev = strings.TrimSpace(ev)
-				if ev == "" {
-					continue
-				}
-
-				fmt.Fprintf(&b, "  Evidence: %s\n", truncate(ev, 600))
-				evidenceCount++
+				b.WriteString(part.Text)
 			}
 		}
-
-		fmt.Fprintf(&b, "\n")
+		return b.String()
 	}
 
-	return b.String()
+	var generic interface{}
+	if err := json.Unmarshal(raw, &generic); err == nil {
+		return fmt.Sprintf("%v", generic)
+	}
+
+	return string(raw)
 }
 
-func normalizeAI(ai *models.AIAnalysis) {
-	ai.Summary = strings.TrimSpace(ai.Summary)
-	ai.PrimaryCause = strings.TrimSpace(ai.PrimaryCause)
-	ai.OwnerHint = strings.TrimSpace(ai.OwnerHint)
-	ai.Confidence = strings.ToLower(strings.TrimSpace(ai.Confidence))
+func extractJSONObject(content string) string {
+	content = strings.TrimSpace(content)
 
-	if ai.Confidence != "low" && ai.Confidence != "medium" && ai.Confidence != "high" {
-		ai.Confidence = "low"
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	start := strings.Index(content, "{")
+	end := strings.LastIndex(content, "}")
+
+	if start >= 0 && end >= start {
+		return content[start : end+1]
 	}
 
-	if ai.OwnerHint == "" {
-		ai.OwnerHint = "unknown"
+	return content
+}
+
+func normalizeAIResult(result *models.AIAnalysis) {
+	if result.Summary == "" {
+		result.Summary = "AI analysis completed, but no summary was returned."
 	}
 
-	if ai.Summary == "" {
-		ai.Summary = "AI analysis did not provide a summary."
+	if result.PrimaryCause == "" {
+		result.PrimaryCause = "Unknown"
+	}
+
+	if result.OwnerHint == "" {
+		result.OwnerHint = "Unknown"
+	}
+
+	result.Confidence = strings.ToLower(strings.TrimSpace(result.Confidence))
+	switch result.Confidence {
+	case "low", "medium", "high":
+	default:
+		result.Confidence = "medium"
+	}
+
+	if result.SecondaryCauses == nil {
+		result.SecondaryCauses = []string{}
+	}
+
+	if result.RecommendedSteps == nil {
+		result.RecommendedSteps = []string{}
 	}
 }
 
 func truncate(s string, max int) string {
+	s = strings.TrimSpace(s)
+
 	if max <= 0 || len(s) <= max {
 		return s
 	}
 
-	return s[:max] + "..."
+	return s[:max] + "...<truncated>"
 }

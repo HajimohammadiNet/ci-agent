@@ -91,6 +91,15 @@ spec:
             - name: OPENROUTER_HTTP_REFERER
               value: {{ default "" $openrouter.httpReferer | quote }}
 
+            - name: OPENROUTER_PREMIUM_MODEL
+              value: {{ default "" $openrouter.premiumModel | quote }}
+
+            - name: OPENROUTER_PREMIUM_TIMEOUT
+              value: {{ default "90s" $openrouter.premiumTimeout | quote }}
+
+            - name: OPENROUTER_PREMIUM_MAX_EVIDENCE
+              value: {{ default 25 $openrouter.premiumMaxEvidence | quote }}
+
             {{- if and (default false $ai.enabled) (eq (default "openrouter" $ai.provider) "openrouter") }}
             - name: OPENROUTER_API_KEY
               valueFrom:

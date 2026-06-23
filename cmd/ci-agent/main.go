@@ -26,6 +26,7 @@ type analyzeHTTPRequest struct {
 	ProjectID  string `json:"project_id"`
 	PipelineID int64  `json:"pipeline_id"`
 	Format     string `json:"format"`
+	AIMode     string `json:"ai_mode"`
 }
 
 type errorResponse struct {
@@ -56,6 +57,7 @@ func runAnalyze(args []string) {
 	pipelineIDFlag := fs.Int64("pipeline-id", 0, "GitLab pipeline ID")
 	urlFlag := fs.String("url", "", "GitLab pipeline or job URL")
 	formatFlag := fs.String("format", "json", "Output format: json, summary, short, markdown, md, text, full")
+	aiModeFlag := fs.String("ai-mode", "auto", "AI mode: auto, off, standard, premium")
 
 	_ = fs.Parse(args)
 
@@ -71,12 +73,15 @@ func runAnalyze(args []string) {
 		URL:        *urlFlag,
 		ProjectID:  *projectIDFlag,
 		PipelineID: *pipelineIDFlag,
+		AIMode:     *aiModeFlag,
 	})
 	if err != nil {
 		exitErr("analyze failed", err)
 	}
 
-	printReport(report, *formatFlag)
+	if err := printReport(os.Stdout, report, *formatFlag); err != nil {
+		exitErr("print report failed", err)
+	}
 }
 
 func runServe(args []string) {
@@ -115,11 +120,12 @@ func runServe(args []string) {
 		}
 
 		log.Printf(
-			"analyze request url=%q project_id=%q pipeline_id=%d format=%q",
+			"analyze request url=%q project_id=%q pipeline_id=%d format=%q ai_mode=%q",
 			req.URL,
 			req.ProjectID,
 			req.PipelineID,
 			req.Format,
+			req.AIMode,
 		)
 
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
@@ -129,6 +135,7 @@ func runServe(args []string) {
 			URL:        req.URL,
 			ProjectID:  req.ProjectID,
 			PipelineID: req.PipelineID,
+			AIMode:     req.AIMode,
 		})
 		if err != nil {
 			log.Printf("analyze failed: %v", err)
@@ -210,7 +217,7 @@ func newAgentService() (*agent.Service, error) {
 func buildAIAnalyzer() *ai.Analyzer {
 	enabled := getenvBool("AI_ENABLED", false)
 	if !enabled {
-		return ai.NewAnalyzer(false, nil)
+		return ai.NewAnalyzer(false, nil, nil)
 	}
 
 	providerName := strings.ToLower(strings.TrimSpace(os.Getenv("AI_PROVIDER")))
@@ -220,44 +227,45 @@ func buildAIAnalyzer() *ai.Analyzer {
 
 	switch providerName {
 	case "openrouter":
-		provider, err := openrouter.New(openrouter.Config{
+		standard, err := openrouter.New(openrouter.Config{
 			APIKey:      os.Getenv("OPENROUTER_API_KEY"),
-			Model:       getenvDefault("OPENROUTER_MODEL", "deepseek/deepseek-v4-pro"),
+			Model:       getenvDefault("OPENROUTER_MODEL", "qwen/qwen3.7-plus"),
 			BaseURL:     getenvDefault("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
-			Timeout:     getenvDuration("OPENROUTER_TIMEOUT", 60*time.Second),
-			MaxEvidence: getenvInt("OPENROUTER_MAX_EVIDENCE", 40),
+			Timeout:     getenvDuration("OPENROUTER_TIMEOUT", 75*time.Second),
+			MaxEvidence: getenvInt("OPENROUTER_MAX_EVIDENCE", 15),
 			AppTitle:    getenvDefault("OPENROUTER_APP_TITLE", "ci-agent"),
 			AppReferer:  os.Getenv("OPENROUTER_HTTP_REFERER"),
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "AI disabled: %v\n", err)
-			return ai.NewAnalyzer(false, nil)
+			return ai.NewAnalyzer(false, nil, nil)
 		}
 
-		return ai.NewAnalyzer(true, provider)
+		var premium ai.Provider
+
+		premiumModel := strings.TrimSpace(os.Getenv("OPENROUTER_PREMIUM_MODEL"))
+		if premiumModel != "" {
+			p, err := openrouter.New(openrouter.Config{
+				APIKey:      os.Getenv("OPENROUTER_API_KEY"),
+				Model:       premiumModel,
+				BaseURL:     getenvDefault("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
+				Timeout:     getenvDuration("OPENROUTER_PREMIUM_TIMEOUT", 90*time.Second),
+				MaxEvidence: getenvInt("OPENROUTER_PREMIUM_MAX_EVIDENCE", 25),
+				AppTitle:    getenvDefault("OPENROUTER_APP_TITLE", "ci-agent"),
+				AppReferer:  os.Getenv("OPENROUTER_HTTP_REFERER"),
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "AI premium provider disabled: %v\n", err)
+			} else {
+				premium = p
+			}
+		}
+
+		return ai.NewAnalyzer(true, standard, premium)
 
 	default:
 		fmt.Fprintf(os.Stderr, "AI disabled: unsupported provider %q\n", providerName)
-		return ai.NewAnalyzer(false, nil)
-	}
-}
-
-func printReport(report *models.PipelineAnalysis, format string) {
-	format = normalizeFormat(format)
-
-	switch format {
-	case "json":
-		printJSON(report)
-
-	case "summary":
-		fmt.Print(reporter.Summary(*report))
-
-	case "markdown":
-		fmt.Print(reporter.Markdown(*report))
-
-	default:
-		fmt.Fprintf(os.Stderr, "unsupported format: %s\n", format)
-		os.Exit(1)
+		return ai.NewAnalyzer(false, nil, nil)
 	}
 }
 
@@ -325,8 +333,8 @@ func exitErr(msg string, err error) {
 
 func printUsageAndExit() {
 	fmt.Println("Usage:")
-	fmt.Println("  ci-agent analyze --url <gitlab_pipeline_or_job_url> [--format json|summary|short|markdown|md|text|full]")
-	fmt.Println("  ci-agent analyze --project-id <project_id_or_path> --pipeline-id <pipeline_id> [--format json|summary|short|markdown|md|text|full]")
+	fmt.Println("  ci-agent analyze --url <gitlab_pipeline_or_job_url> [--format json|summary|short|markdown|md|text|full] [--ai-mode auto|off|standard|premium]")
+	fmt.Println("  ci-agent analyze --project-id <project_id_or_path> --pipeline-id <pipeline_id> [--format json|summary|short|markdown|md|text|full] [--ai-mode auto|off|standard|premium]")
 	fmt.Println("  ci-agent serve [--listen :8080]")
 	fmt.Println("")
 	fmt.Println("Environment:")
@@ -347,6 +355,9 @@ func printUsageAndExit() {
 	fmt.Println("  OPENROUTER_MAX_EVIDENCE=40")
 	fmt.Println("  OPENROUTER_APP_TITLE=ci-agent")
 	fmt.Println("  OPENROUTER_HTTP_REFERER=")
+	fmt.Println("  OPENROUTER_PREMIUM_MODEL=")
+	fmt.Println("  OPENROUTER_PREMIUM_TIMEOUT=90s")
+	fmt.Println("  OPENROUTER_PREMIUM_MAX_EVIDENCE=25")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  ci-agent analyze --url https://gitlab.example.com/group/project/-/pipelines/9876")
@@ -461,5 +472,29 @@ func logRequests(next http.HandlerFunc) http.HandlerFunc {
 			rec.bytes,
 			time.Since(start),
 		)
+	}
+}
+
+func printReport(w io.Writer, report *models.PipelineAnalysis, format string) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+
+	switch format {
+	case "json":
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+
+	case "summary", "short":
+		_, err := fmt.Fprintln(w, reporter.Summary(*report))
+		return err
+
+	case "markdown", "md", "text", "full":
+		_, err := fmt.Fprintln(w, reporter.Markdown(*report))
+		return err
+
+	default:
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
 	}
 }
