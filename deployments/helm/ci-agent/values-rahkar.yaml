@@ -27,7 +27,7 @@ openrouter:
   model: qwen/qwen3.7-plus
   baseUrl: https://openrouter.ai/api/v1/chat/completions
   timeout: 30s
-  maxEvidence: 40
+  maxEvidence: 25
   appTitle: ci-agent
   httpReferer: ""
   existingSecret: ci-agent-openrouter-secret

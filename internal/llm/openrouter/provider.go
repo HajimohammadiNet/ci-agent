@@ -132,6 +132,7 @@ type chatCompletionRequest struct {
 	Model          string                 `json:"model"`
 	Messages       []message              `json:"messages"`
 	Temperature    float64                `json:"temperature"`
+	MaxTokens      int                    `json:"max_tokens,omitempty"`
 	ResponseFormat map[string]interface{} `json:"response_format,omitempty"`
 }
 
@@ -190,6 +191,7 @@ Important:
 	return chatCompletionRequest{
 		Model:       p.model,
 		Temperature: 0.2,
+		MaxTokens:   800,
 		Messages: []message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
